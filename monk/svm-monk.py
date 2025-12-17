@@ -59,7 +59,7 @@ def plot_class_distribution(y, title="Class Distribution"):
 
 def plot_confusion_matrix_heatmap(y_true, y_pred, dataset_idx: int = 1):
     """Plot confusion matrix heatmap."""
-    cm = confusion_matrix(y_test, y_pred)
+    cm = confusion_matrix(y_true, y_pred)
     labels = np.unique(np.concatenate([y_test, y_pred]))
     plt.figure(figsize=(6, 4))
     sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels)
