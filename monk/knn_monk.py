@@ -54,10 +54,7 @@ for monk_id in monk_ids:
 
     tr_acc = accuracy_score(y_train, y_pred_train)
     test_acc = accuracy_score(y_test, y_pred)
-    
-    # cross val score on TR with best model
-    cv_scores = cross_val_score(best_model, X_train, y_train, cv=cv, scoring='accuracy')
-    cv_mean = cv_scores.mean()
+    cv_mean = random_search.best_score_
     
     print("")
     print(f"TR accuracy: {(tr_acc*100):.2f} %")
