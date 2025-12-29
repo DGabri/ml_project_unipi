@@ -1,558 +1,375 @@
-from typing import Tuple, Dict, List
 import numpy as np
-import matplotlib.pyplot as plt
 import seaborn as sns
-from sklearn.metrics import accuracy_score, confusion_matrix, classification_report
+from sklearn.metrics import classification_report
 from sklearn.model_selection import train_test_split, ParameterGrid, StratifiedKFold
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import random
-
 from monks_data_loader import load_monk_data
+from monk_utils import plot_confusion_matrix, calculate_majority_baseline,plot_curves,set_seed
 
-# ============================================================================
-# SEED E UTILITY
-# ============================================================================
+# neural network model
+class MLP(nn.Module):
 
-def set_seed(seed: int = 42):
-    """Imposta i seed per riproducibilità."""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
-def calculate_majority_baseline(y_train, y_test) -> Tuple[float, object]:
-    """Return baseline accuracy and majority class."""
-    try:
-        majority_class = y_train.mode()[0]
-    except Exception:
-        vals, counts = np.unique(y_train, return_counts=True)
-        majority_class = vals[np.argmax(counts)]
-    majority_pred = np.full(len(y_test), majority_class)
-    return accuracy_score(y_test, majority_pred), majority_class
-
-
-def plot_confusion_matrix_heatmap(y_true, y_pred, dataset_idx: int = 1):
-    """Plot confusion matrix heatmap."""
-    cm = confusion_matrix(y_true, y_pred)
-    labels = np.unique(np.concatenate([y_true, y_pred]))
-    plt.figure(figsize=(6, 4))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", 
-                xticklabels=labels, yticklabels=labels)
-    plt.title(f"Confusion Matrix - Monk-{dataset_idx}")
-    plt.xlabel("Predicted")
-    plt.ylabel("True")
-    plt.tight_layout()
-    plt.show()
-
-
-def plot_learning_curve(train_errors: List[float], val_errors: List[float], 
-                       dataset_idx: int = 1, title_suffix: str = ""):
-    def smooth_curve(values, window):
-        if len(values) < window:
-            return np.array(values)
-        return np.convolve(values, np.ones(window)/window, mode='valid')
-    smoothing_window = 5
-    # Smoothing
-    train_err_smooth = smooth_curve(train_errors, smoothing_window)
-    val_err_smooth = smooth_curve(val_errors, smoothing_window)
-    
-    train_acc_smooth = 1 - train_err_smooth
-    val_acc_smooth = 1 - val_err_smooth
-    
-    epochs = range(1, len(train_err_smooth) + 1)
-    
-    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-    
-    # --------- Error Rate subplot ---------
-    axes[0].plot(epochs, train_err_smooth, 'b-', label='Training Error', linewidth=2)
-    axes[0].plot(epochs, val_err_smooth, 'r-', label='Validation Error', linewidth=2)
-    axes[0].set_xlabel('Epoch')
-    axes[0].set_ylabel('Error Rate')
-    axes[0].set_title(f"Error Rate - Monk-{dataset_idx}{title_suffix}")
-    axes[0].grid(True, alpha=0.3)
-    axes[0].legend()
-    
-    # --------- Accuracy subplot ---------
-    axes[1].plot(epochs, train_acc_smooth, 'b--', label='Training Accuracy', linewidth=2)
-    axes[1].plot(epochs, val_acc_smooth, 'r--', label='Validation Accuracy', linewidth=2)
-    axes[1].set_xlabel('Epoch')
-    axes[1].set_ylabel('Accuracy')
-    axes[1].set_title(f"Accuracy - Monk-{dataset_idx}{title_suffix}")
-    axes[1].grid(True, alpha=0.3)
-    axes[1].legend()
-    
-    plt.tight_layout()
-    plt.show()
-
-# ============================================================================
-# PYTORCH MLP MODEL
-# ============================================================================
-
-class MLPClassifier(nn.Module):
-    """Multi-Layer Perceptron per classificazione binaria."""
-    
-    def __init__(self, input_dim: int, n_units: int):
-        super(MLPClassifier, self).__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, n_units),
+    # constructor
+    def __init__(self, input_size, hidden_size):
+        super(MLP, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_size, hidden_size),
             nn.Sigmoid(),
-            nn.Linear(n_units, 1),
+            nn.Linear(hidden_size, 1),
             nn.Sigmoid()
         )
-    
+    # forward method
     def forward(self, x):
-        return self.network(x).squeeze(1)
+        return self.net(x).squeeze(1)
+    # initialize weights 
+    def init_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
-
-# ============================================================================
-# TRAINING FUNCTIONS
-# ============================================================================
-
-def train_model(model, optimizer, train_dataloader, val_dataloader, 
-                patience=15, max_epochs=200, track_errors=False):
-    """Train model with early stopping and optional error tracking."""
+# training function with early stopping
+def train_net(model, opt, train_dl, val_dl, patience=15, max_ep=200, track=False):
+    # initialize weights
+    model.init_weights()
     criterion = nn.BCELoss()
-    best_val_loss = float('inf')
-    best_model_state = None
-    epochs_no_improve = 0
+    best_loss = float('inf')
+    best_weights = None
+    no_improve = 0
     
-    train_errors = []
-    val_errors = []
+    # tracking
+    tr_errs = []
+    val_errs = []
 
-    for epoch in range(max_epochs):
-        # Training
+    # training loop with early stopping
+    for epoch in range(max_ep):
         model.train()
-        train_correct = 0
-        train_total = 0
-        for x_batch, y_batch in train_dataloader:
-            optimizer.zero_grad()
-            y_pred = model(x_batch)
-            loss = criterion(y_pred, y_batch)
+        tr_correct = 0
+        tr_total = 0
+        
+        # training epoch
+        for xb, yb in train_dl:
+            opt.zero_grad()
+            out = model(xb)
+            loss = criterion(out, yb)
             loss.backward()
-            optimizer.step()
+            opt.step()
             
-            if track_errors:
-                predicted = (y_pred > 0.5).int()
-                train_correct += (predicted == y_batch.int()).sum().item()
-                train_total += len(y_batch)
+            # tracking accuracy
+            if track:
+                pred = (out > 0.5).int()
+                tr_correct += (pred == yb.int()).sum().item()
+                tr_total += len(yb)
 
-        # Validation
+        # validation epoch
         model.eval()
-        val_loss = 0
-        val_correct = 0
-        val_total = 0
+        v_loss = 0
+        v_correct = 0
+        v_total = 0
+        
+        # validation loop
         with torch.no_grad():
-            for x_batch, y_batch in val_dataloader:
-                y_pred = model(x_batch)
-                loss = criterion(y_pred, y_batch)
-                val_loss += loss.item() * len(x_batch)
-                
-                if track_errors:
-                    predicted = (y_pred > 0.5).int()
-                    val_correct += (predicted == y_batch.int()).sum().item()
-                    val_total += len(y_batch)
+            for xb, yb in val_dl:
+                out = model(xb)
+                loss = criterion(out, yb)
+                v_loss += loss.item() * len(xb)
+                # tracking accuracy
+                if track:
+                    pred = (out > 0.5).int()
+                    v_correct += (pred == yb.int()).sum().item()
+                    v_total += len(yb)
         
-        val_loss /= len(val_dataloader.dataset)
+        # average validation loss
+        v_loss /= len(val_dl.dataset)
         
-        if track_errors:
-            train_error = 1 - (train_correct / train_total)
-            val_error = 1 - (val_correct / val_total)
-            train_errors.append(train_error)
-            val_errors.append(val_error)
+        # tracking errors
+        if track:
+            tr_err = 1 - (tr_correct / tr_total)
+            v_err = 1 - (v_correct / v_total)
+            tr_errs.append(tr_err)
+            val_errs.append(v_err)
 
-        # Early stopping
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            best_model_state = model.state_dict().copy()
-            epochs_no_improve = 0
+        # early stopping check
+        if v_loss < best_loss:
+            best_loss = v_loss
+            best_weights = model.state_dict().copy()
+            no_improve = 0
         else:
-            epochs_no_improve += 1
-            if epochs_no_improve >= patience:
+            no_improve += 1
+            if no_improve >= patience:
                 break
 
-    # Load best model
-    if best_model_state is not None:
-        model.load_state_dict(best_model_state)
+    if best_weights is not None:
+        model.load_state_dict(best_weights)
     
-    if track_errors:
-        return model, train_errors, val_errors
+    if track:
+        return model, tr_errs, val_errs
     return model
 
-
-def evaluate_model(model, dataloader):
-    """Evaluate model accuracy."""
+# evaluation function
+def eval_model(model, dl):
     model.eval()
     correct = 0
     total = 0
+    # evaluation loop
     with torch.no_grad():
-        for x_batch, y_batch in dataloader:
-            y_pred = model(x_batch)
-            predicted = (y_pred > 0.5).int()
-            correct += (predicted == y_batch.int()).sum().item()
-            total += len(y_batch)
+        for xb, yb in dl:
+            out = model(xb)
+            pred = (out > 0.5).int()
+            correct += (pred == yb.int()).sum().item()
+            total += len(yb)
     return correct / total if total > 0 else 0
 
-
-# ============================================================================
-# PARAMETER GRIDS
-# ============================================================================
-
-def get_param_grid(dataset_idx: int) -> Dict:
-    """Restituisce la griglia di iperparametri per ogni dataset."""
-    
-    if dataset_idx == 1:
+# hyperparameter grid
+def get_params(dataset_num):
+    if dataset_num == 1:
         return {
             'n_units': [3, 4],
-            'learning_rate': [0.5, 0.8],
-            'batch_size': [1, 2],
-            'momentum': [0.8, 0.9],
-            'weight_decay': [0.0]
+            'lr': [0.5, 0.8],
+            'bs': [1, 2],
+            'mom': [0.8, 0.9],
+            'wd': [0.0]
         }
-    elif dataset_idx == 2:
-                return {
-            'n_units': [3, 4],
-                'learning_rate': [ 0.2,0.3],
-                'batch_size': [1,2],
-                'momentum': [0.5],
-                'weight_decay': [0.0, 0.001]
-        }
-    else:  # dataset_idx == 3
+    elif dataset_num == 2:
         return {
-                    'n_units': [4, 5],
-        'learning_rate': [0.01, 0.05],
-        'batch_size': [4, 8],
-        'momentum': [0.9, 0.92],
-        'weight_decay': [0.0005, 0.001, 0.005]
-
+            'n_units': [3, 4],
+            'lr': [0.2, 0.3],
+            'bs': [1, 2],
+            'mom': [0.5],
+            'wd': [0.0, 0.001]
+        }
+    else:
+        return {
+            'n_units': [4, 5],
+            'lr': [0.01, 0.05],
+            'bs': [4, 8],
+            'mom': [0.9, 0.92],
+            'wd': [0.0005, 0.001, 0.005]
         }
 
-
-# ============================================================================
-# NESTED CROSS-VALIDATION
-# ============================================================================
-
-def nested_cross_validation(X_train, y_train, dataset_idx: int,
-                            inner_cv_folds: int = 3,
-                            outer_cv_folds: int = 5) -> Tuple[np.ndarray, List[Dict]]:
-    """
-    Nested cross-validation per MLP:
-    - Outer CV: stima performance di generalizzazione
-    - Inner CV: selezione iperparametri
-    """
+# nested cross-validation
+def nested_cv(X_tr, y_tr, dataset_num, inner_k=3, outer_k=5):
     
-    print(f"\n{'='*80}")
-    print(f"NESTED CROSS-VALIDATION - Monk-{dataset_idx}")
-    print(f"Outer CV: {outer_cv_folds} folds | Inner CV: {inner_cv_folds} folds")
-    print(f"{'='*80}\n")
+    # prepare data
+    X = X_tr.values if hasattr(X_tr, 'values') else X_tr
+    y = y_tr.values if hasattr(y_tr, 'values') else y_tr
     
-    # Converti a numpy se necessario
-    X = X_train.values if hasattr(X_train, 'values') else X_train
-    y = y_train.values if hasattr(y_train, 'values') else y_train
+    # get hyperparameter grid
+    params = get_params(dataset_num)
+    outer = StratifiedKFold(n_splits=outer_k, shuffle=True, random_state=42)
     
-    param_grid = get_param_grid(dataset_idx)
-    outer_cv = StratifiedKFold(n_splits=outer_cv_folds, shuffle=True, random_state=42)
+    scores = []
+    best_params_list = []
     
-    nested_scores = []
-    best_params_per_fold = []
-    
-    for fold_idx, (train_idx, val_idx) in enumerate(outer_cv.split(X, y), 1):
-        print(f"Processing Outer Fold {fold_idx}/{outer_cv_folds}...")
+    # MODEL ASSESSMENT
+    # outer cross-validation
+    for fold, (tr_idx, val_idx) in enumerate(outer.split(X, y), 1):
         
-        X_train_fold = X[train_idx]
-        X_val_fold = X[val_idx]
-        y_train_fold = y[train_idx]
-        y_val_fold = y[val_idx]
+        X_tr_f = X[tr_idx]
+        X_val_f = X[val_idx]
+        y_tr_f = y[tr_idx]
+        y_val_f = y[val_idx]
         
-        # Inner CV: Grid Search per trovare i migliori iperparametri
-        inner_cv = StratifiedKFold(n_splits=inner_cv_folds, shuffle=True, random_state=42)
-        grid = list(ParameterGrid(param_grid))
+        # internal cross-validation for hyperparameter tuning
+        inner = StratifiedKFold(n_splits=inner_k, shuffle=True, random_state=42)
+        grid = list(ParameterGrid(params))
         
-        best_config = None
-        best_inner_score = 0
+        best_cfg = None
+        best_score = -np.inf
         
-        for config in grid:
+        # MODEL SELECTION
+        # inner cross-validation
+        for cfg in grid:
             inner_scores = []
-            
-            for inner_train_idx, inner_val_idx in inner_cv.split(X_train_fold, y_train_fold):
-                X_inner_train = torch.FloatTensor(X_train_fold[inner_train_idx])
-                y_inner_train = torch.FloatTensor(y_train_fold[inner_train_idx])
-                X_inner_val = torch.FloatTensor(X_train_fold[inner_val_idx])
-                y_inner_val = torch.FloatTensor(y_train_fold[inner_val_idx])
+            # inner folds
+            for itr_idx, ival_idx in inner.split(X_tr_f, y_tr_f):
+                X_itr = torch.FloatTensor(X_tr_f[itr_idx])
+                y_itr = torch.FloatTensor(y_tr_f[itr_idx])
+                X_ival = torch.FloatTensor(X_tr_f[ival_idx])
+                y_ival = torch.FloatTensor(y_tr_f[ival_idx])
                 
-                train_dataset = TensorDataset(X_inner_train, y_inner_train)
-                val_dataset = TensorDataset(X_inner_val, y_inner_val)
+                # create dataloaders
+                tr_ds = TensorDataset(X_itr, y_itr)
+                val_ds = TensorDataset(X_ival, y_ival)
                 
-                train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
-                val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False)
+                tr_dl = DataLoader(tr_ds, batch_size=cfg['bs'], shuffle=True)
+                val_dl = DataLoader(val_ds, batch_size=cfg['bs'], shuffle=False)
+
+                # train model
+                net = MLP(X.shape[1], cfg['n_units'])
+                opt = optim.SGD(net.parameters(), lr=cfg['lr'], 
+                               momentum=cfg['mom'], weight_decay=cfg['wd'])
                 
-                model = MLPClassifier(input_dim=X.shape[1], n_units=config['n_units'])
-                optimizer = optim.SGD(
-                    model.parameters(),
-                    lr=config['learning_rate'],
-                    momentum=config['momentum'],
-                    weight_decay=config['weight_decay']
-                )
-                if dataset_idx == 1:
-                    patience = 10
-                    max_epochs = 100
-                else:
-                    patience = 15
-                    max_epochs = 200
-                model = train_model(model, optimizer, train_loader, val_loader, 
-                                  patience=patience, max_epochs=max_epochs, track_errors=False)
-                inner_score = evaluate_model(model, val_loader)
-                inner_scores.append(inner_score)
+                pat = 10 if dataset_num == 1 else 15
+                maxe = 100 if dataset_num == 1 else 200
+                
+                # train and evaluate
+                net = train_net(net, opt, tr_dl, val_dl, patience=pat, 
+                              max_ep=maxe, track=False)
+                sc = eval_model(net, val_dl)
+                inner_scores.append(sc)
             
-            avg_inner_score = np.mean(inner_scores)
-            
-            if avg_inner_score > best_inner_score:
-                best_inner_score = avg_inner_score
-                best_config = config
+            avg_sc = np.mean(inner_scores)
+            # check for best config
+            if avg_sc > best_score:
+                best_score = avg_sc
+                best_cfg = cfg
         
-        # Train final model per questo outer fold con i migliori parametri
-        X_train_t = torch.FloatTensor(X_train_fold)
-        y_train_t = torch.FloatTensor(y_train_fold)
-        X_val_t = torch.FloatTensor(X_val_fold)
-        y_val_t = torch.FloatTensor(y_val_fold)
+        # final model training with best hyperparameters
+        X_tr_t = torch.FloatTensor(X_tr_f)
+        y_tr_t = torch.FloatTensor(y_tr_f)
+        X_val_t = torch.FloatTensor(X_val_f)
+        y_val_t = torch.FloatTensor(y_val_f)
         
-        train_dataset = TensorDataset(X_train_t, y_train_t)
-        val_dataset = TensorDataset(X_val_t, y_val_t)
+        tr_ds = TensorDataset(X_tr_t, y_tr_t)
+        val_ds = TensorDataset(X_val_t, y_val_t)
         
-        train_loader = DataLoader(train_dataset, batch_size=best_config['batch_size'], shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=best_config['batch_size'], shuffle=False)
-        
-        final_model = MLPClassifier(input_dim=X.shape[1], n_units=best_config['n_units'])
-        optimizer = optim.SGD(
-            final_model.parameters(),
-            lr=best_config['learning_rate'],
-            momentum=best_config['momentum'],
-            weight_decay=best_config['weight_decay']
-        )
-        
-        if dataset_idx == 1:
-            patience = 10
-            max_epochs = 100
-        else:
-            patience = 15
-            max_epochs = 200
-        final_model = train_model(final_model, optimizer, train_loader, val_loader, 
-                                 patience=patience, max_epochs=max_epochs, track_errors=False)
-        fold_score = evaluate_model(final_model, val_loader)
-        
-        nested_scores.append(fold_score)
-        best_params_per_fold.append(best_config)
-        
-        print(f"  Best params: {best_config}")
-        print(f"  Inner CV score: {best_inner_score:.4f}")
-        print(f"  Outer validation score: {fold_score:.4f}\n")
-    
-    nested_scores = np.array(nested_scores)
-    
-    print(f"{'='*80}")
-    print(f"NESTED CV RESULTS - Monk-{dataset_idx}")
-    print(f"{'='*80}")
-    print(f"Mean Accuracy: {nested_scores.mean():.4f} ± {nested_scores.std():.4f}")
-    print(f"Min Accuracy: {nested_scores.min():.4f}")
-    print(f"Max Accuracy: {nested_scores.max():.4f}")
-    print(f"Scores per fold: {nested_scores}")
-    print(f"{'='*80}\n")
-    
-    return nested_scores, best_params_per_fold
+        tr_dl = DataLoader(tr_ds, batch_size=best_cfg['bs'], shuffle=True)
+        val_dl = DataLoader(val_ds, batch_size=best_cfg['bs'], shuffle=False)
 
+        # train final model
+        final_net = MLP(X.shape[1], best_cfg['n_units'])
+        opt = optim.SGD(final_net.parameters(), lr=best_cfg['lr'],
+                       momentum=best_cfg['mom'], weight_decay=best_cfg['wd'])
+        
+        pat = 10 if dataset_num == 1 else 15
+        maxe = 100 if dataset_num == 1 else 200
+        
+        final_net = train_net(final_net, opt, tr_dl, val_dl, 
+                            patience=pat, max_ep=maxe, track=False)
+        fold_sc = eval_model(final_net, val_dl)
+        
+        scores.append(fold_sc)
+        best_params_list.append(best_cfg)
+        
+        print(f"Fold {fold}/{outer_k} | params: {best_cfg} | inner score: {best_score:.4f} | outer score: {fold_sc:.4f}")
+    
+    scores = np.array(scores)
+    
+    print(f"\nNested CV results - Monk-{dataset_num}\nMean: {scores.mean():.4f} ± {scores.std():.4f}\nRange: [{scores.min():.4f}, {scores.max():.4f}]\n")
+    
+    return scores, best_params_list
 
-# ============================================================================
-# FINAL MODEL TRAINING
-# ============================================================================
+# final training on full training set and testing
+def train_final(X_tr, y_tr, X_te, y_te, dataset_num):
+    
+    X_tr = X_tr.values if hasattr(X_tr, 'values') else X_tr
+    y_tr = y_tr.values if hasattr(y_tr, 'values') else y_tr
+    X_te = X_te.values if hasattr(X_te, 'values') else X_te
+    y_te = y_te.values if hasattr(y_te, 'values') else y_te
+    
+    # split train/val
+    X_t, X_v, y_t, y_v = train_test_split(X_tr, y_tr, test_size=0.2, 
+                                          random_state=42, stratify=y_tr)
+    
+    params = get_params(dataset_num)
+    grid = list(ParameterGrid(params))
+    
+    best_cfg = None
+    best_acc = 0
+    best_net = None
+    best_tr_errs = None
+    best_val_errs = None
 
-def train_final_model(X_train, y_train, X_test, y_test, dataset_idx: int):
-    """Train final model su tutto il training set."""
-    
-    print(f"\n{'='*80}")
-    print(f"FINAL MODEL TRAINING - Monk-{dataset_idx}")
-    print(f"{'='*80}\n")
-    
-    # Converti a numpy
-    X_train_np = X_train.values if hasattr(X_train, 'values') else X_train
-    y_train_np = y_train.values if hasattr(y_train, 'values') else y_train
-    X_test_np = X_test.values if hasattr(X_test, 'values') else X_test
-    y_test_np = y_test.values if hasattr(y_test, 'values') else y_test
-    
-    # Split per validation
-    X_train_split, X_val, y_train_split, y_val = train_test_split(
-        X_train_np, y_train_np, test_size=0.2, random_state=42, stratify=y_train_np
-    )
-    
-    # Grid search
-    param_grid = get_param_grid(dataset_idx)
-    grid = list(ParameterGrid(param_grid))
-    
-    best_config = None
-    best_val_acc = 0
-    best_model = None
-    best_train_errors = None
-    best_val_errors = None
-    
-    print(f"Testing {len(grid)} configurations...")
-    
-    for i, config in enumerate(grid):
-        X_train_t = torch.FloatTensor(X_train_split)
-        y_train_t = torch.FloatTensor(y_train_split)
-        X_val_t = torch.FloatTensor(X_val)
-        y_val_t = torch.FloatTensor(y_val)
+    # hyperparameter search
+    for i, cfg in enumerate(grid):
+        X_t_t = torch.FloatTensor(X_t)
+        y_t_t = torch.FloatTensor(y_t)
+        X_v_t = torch.FloatTensor(X_v)
+        y_v_t = torch.FloatTensor(y_v)
         
-        train_dataset = TensorDataset(X_train_t, y_train_t)
-        val_dataset = TensorDataset(X_val_t, y_val_t)
+        tr_ds = TensorDataset(X_t_t, y_t_t)
+        val_ds = TensorDataset(X_v_t, y_v_t)
         
-        train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False)
+        tr_dl = DataLoader(tr_ds, batch_size=cfg['bs'], shuffle=True)
+        val_dl = DataLoader(val_ds, batch_size=cfg['bs'], shuffle=False)
         
-        model = MLPClassifier(input_dim=X_train_np.shape[1], n_units=config['n_units'])
-        optimizer = optim.SGD(
-            model.parameters(),
-            lr=config['learning_rate'],
-            momentum=config['momentum'],
-            weight_decay=config['weight_decay']
-        )
-        if dataset_idx == 1:
-            patience = 10
-            max_epochs = 100
-        else:
-            patience = 15
-            max_epochs = 200
-        model, train_errors, val_errors = train_model(model, optimizer, train_loader, val_loader, 
-                                                      patience=patience, max_epochs=max_epochs, track_errors=True)
-        val_acc = evaluate_model(model, val_loader)
+        net = MLP(X_tr.shape[1], cfg['n_units'])
+        opt = optim.SGD(net.parameters(), lr=cfg['lr'],
+                       momentum=cfg['mom'], weight_decay=cfg['wd'])
         
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            best_config = config
-            best_model = model
-            best_train_errors = train_errors
-            best_val_errors = val_errors
+        pat = 10 if dataset_num == 1 else 15
+        maxe = 100 if dataset_num == 1 else 200
+        
+        net, tr_e, val_e = train_net(net, opt, tr_dl, val_dl,
+                                    patience=pat, max_ep=maxe, track=True)
+        acc = eval_model(net, val_dl)
+        
+        if acc > best_acc:
+            best_acc = acc
+            best_cfg = cfg
+            best_net = net
+            best_tr_errs = tr_e
+            best_val_errs = val_e
         
         if (i + 1) % 5 == 0:
-            print(f"  Tested {i+1}/{len(grid)} - Best so far: {best_val_acc:.4f}")
+            print(f"  {i+1}/{len(grid)} done, best: {best_acc:.4f}")
     
-    print(f"\nBest config: {best_config}")
-    print(f"Best validation accuracy: {best_val_acc:.4f}")
+    print(f"\nBest config: {best_cfg}")
+    print(f"Val accuracy: {best_acc:.4f}")
     
-    # Plot learning curve del miglior modello
-    if best_train_errors and best_val_errors:
-        plot_learning_curve(best_train_errors, best_val_errors, 
-                          dataset_idx=dataset_idx, title_suffix=" (Best Model)")
+    if best_tr_errs and best_val_errs:
+        plot_curves(best_tr_errs, best_val_errs, dataset_num, " (best)")
     
-    # Evaluate on test set
-    X_test_t = torch.FloatTensor(X_test_np)
-    y_test_t = torch.FloatTensor(y_test_np)
-    test_dataset = TensorDataset(X_test_t, y_test_t)
-    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+    # test
+    X_te_t = torch.FloatTensor(X_te)
+    y_te_t = torch.FloatTensor(y_te)
+    te_ds = TensorDataset(X_te_t, y_te_t)
+    te_dl = DataLoader(te_ds, batch_size=32, shuffle=False)
     
-    test_acc = evaluate_model(best_model, test_loader)
+    test_acc = eval_model(best_net, te_dl)
     
-    # Get predictions
-    best_model.eval()
+    best_net.eval()
     with torch.no_grad():
-        y_pred = best_model(X_test_t).cpu().numpy()
-        y_pred_binary = (y_pred > 0.5).astype(int)
+        preds = best_net(X_te_t).cpu().numpy()
+        preds_bin = (preds > 0.5).astype(int)
     
-    print(f"\nTest Accuracy: {test_acc:.4f}")
-    print("\nClassification Report:")
-    print(classification_report(y_test_np, y_pred_binary))
-    print(f"{'='*80}\n")
+    print(f"\nTest accuracy: {test_acc:.4f}")
+    print("\nClassification report:")
+    print(classification_report(y_te, preds_bin))
     
-    return best_model, best_config, test_acc, y_pred_binary
+    return best_net, best_cfg, test_acc, preds_bin
 
-
-# ============================================================================
-# FULL ANALYSIS
-# ============================================================================
-
-def full_analysis(X_train, y_train, X_test, y_test, dataset_idx: int):
-    """Analisi completa con nested CV e modello finale."""
+# main analysis function
+def run_analysis(X_tr, y_tr, X_te, y_te, dataset_num):
+    # baseline
+    base_acc, maj_class = calculate_majority_baseline(y_tr, y_te)
+    print(f"Majority baseline: {base_acc:.4f} (class {maj_class})")
     
-    print(f"\n{'#'*80}")
-    print(f"# COMPLETE ANALYSIS FOR MONK-{dataset_idx}")
-    print(f"{'#'*80}\n")
+    # nested cv
+    cv_scores, params_list = nested_cv(X_tr, y_tr, dataset_num, 
+                                       inner_k=3, outer_k=5)
     
-    # Baseline
-    baseline_acc, majority_class = calculate_majority_baseline(y_train, y_test)
-    print(f"Majority Voting Baseline: {baseline_acc:.4f} (Class: {majority_class})")
+    # modello finale
+    best_net, best_cfg, test_acc, preds = train_final(X_tr, y_tr, X_te, y_te, 
+                                                       dataset_num)
     
-    # Nested CV
-    nested_scores, best_params_per_fold = nested_cross_validation(
-        X_train, y_train, dataset_idx=dataset_idx,
-        inner_cv_folds=3, outer_cv_folds=5
-    )
-    
-    # Final Model
-    best_model, best_config, test_acc, y_pred = train_final_model(
-        X_train, y_train, X_test, y_test, dataset_idx=dataset_idx
-    )
-    
-    # Visualizations
-    y_test_np = y_test.values if hasattr(y_test, 'values') else y_test
-    plot_confusion_matrix_heatmap(y_test_np, y_pred, dataset_idx=dataset_idx)
-    
+    # visualizzazioni
+    y_te = y_te.values if hasattr(y_te, 'values') else y_te
+    plot_confusion_matrix(y_te, preds, dataset_num)
     return {
-        'baseline_acc': baseline_acc,
-        'majority_class': majority_class,
-        'nested_cv_scores': nested_scores,
-        'nested_cv_mean': nested_scores.mean(),
-        'nested_cv_std': nested_scores.std(),
-        'best_params_per_fold': best_params_per_fold,
-        'final_best_params': best_config,
+        'baseline': base_acc,
+        'maj_class': maj_class,
+        'cv_scores': cv_scores,
+        'cv_mean': cv_scores.mean(),
+        'cv_std': cv_scores.std(),
+        'params_per_fold': params_list,
+        'final_params': best_cfg,
         'test_acc': test_acc,
     }
 
 
-# ============================================================================
-# MAIN
-# ============================================================================
-
 if __name__ == "__main__":
     set_seed(42)
     
-    print("="*80)
-    print("ANALISI MLP (PyTorch) CON NESTED CV SU TUTTI I DATASET MONKS")
-    print("="*80)
-    
     results = {}
     
-    for n_monk in [1, 2, 3]:
-        x_train, y_train, x_test, y_test = load_monk_data(n_monk)
-        results[n_monk] = full_analysis(x_train, y_train, x_test, y_test, dataset_idx=n_monk)
-    
-    # Riepilogo finale
-    print("\n" + "="*80)
-    print("RIEPILOGO RISULTATI FINALI")
-    print("="*80)
-    
-    for n_monk in [1, 2, 3]:
-        res = results[n_monk]
-        print(f"\n{'--- MONK-' + str(n_monk) + ' ---':^80}")
-        print(f"Baseline Accuracy: {res['baseline_acc']:.4f} (Class: {res['majority_class']})")
-        print(f"\nNested CV (unbiased estimate):")
-        print(f"  Mean Accuracy: {res['nested_cv_mean']:.4f} ± {res['nested_cv_std']:.4f}")
-        print(f"  Scores: {res['nested_cv_scores']}")
-        print(f"\nFinal Model:")
-        print(f"  Best Parameters: {res['final_best_params']}")
-        print(f"  Test Accuracy: {res['test_acc']:.4f}")
-    
-    print("\n" + "="*80)
-    print("CONFRONTO PRESTAZIONI")
-    print("="*80)
-    print(f"{'Dataset':<12} {'Baseline':<12} {'Nested CV':<20} {'Test Acc':<12}")
-    print("-"*80)
-    for n_monk in [1, 2, 3]:
-        res = results[n_monk]
-        print(f"MONK-{n_monk:<7} {res['baseline_acc']:>8.4f}    "
-              f"{res['nested_cv_mean']:>8.4f} ± {res['nested_cv_std']:.4f}    "
-              f"{res['test_acc']:>8.4f}")
+    for n in [1, 2, 3]:
+        x_tr, y_tr, x_te, y_te = load_monk_data(n)
+        print(f"\nMONK-{n} ANALYSIS")
+        results[n] = run_analysis(x_tr, y_tr, x_te, y_te, n)
