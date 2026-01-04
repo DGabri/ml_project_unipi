@@ -69,7 +69,7 @@ class MLCupNN(nn.Module):
 def mee_loss(y_pred, y_true):
     return torch.norm(y_pred - y_true, dim=1).mean()
 
-def train_model(model, optimizer, scheduler, train_dataloader, val_dataloader, scaler_y, max_epochs=500, patience=30, clip_grad=1.0):
+def train_model(model, optimizer, scheduler, train_dataloader, val_dataloader, scaler_y, max_epochs=500, patience=30, clip_grad=1.0, min_delta=0.001):
 
     best_vl_loss = float("inf")
     best_state = None
@@ -126,7 +126,7 @@ def train_model(model, optimizer, scheduler, train_dataloader, val_dataloader, s
             scheduler.step(vl_loss)
 
         # early stopping
-        if vl_loss < best_vl_loss:
+        if vl_loss < best_vl_loss - min_delta:
             best_vl_loss = vl_loss
             best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             flat_epochs = 0
@@ -151,28 +151,15 @@ X_blind = blind_df.values
 # split in dev set and hold out
 X_dev, X_test, y_dev, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-
 param_grid = {
-    'n_hidden_layers': [1, 2],
-    'num_units': [32, 64],
+    'n_hidden_layers': [2, 3],
+    'num_units': [16, 64, 96],
     'momentum': [0.9],
-    'learning_rate': [0.001],
-    'weight_decay': [5e-3, 1e-2],
-    'dropout': [0.4, 0.5],
-    'activation': ['relu'],
-    'optimizer': ['adamw']
-}
-
-# initial grid search
-param_grid = {
-    'n_hidden_layers': [1, 2, 3],
-    'num_units': [48, 64, 96],
-    'momentum': [0.9],
-    'learning_rate': [0.0005, 0.001],
-    'weight_decay': [0.005, 0.01, 0.015, 0.02],
-    'dropout': [0.4, 0.5, 0.6],
-    'activation': ['relu'],
-    'optimizer': ['adam', 'sgd']
+    'learning_rate': [0.001, 0.2],
+    'weight_decay': [0.02],
+    'dropout': [0.3, 0.5, 0.6],
+    'activation': ['gelu'],
+    'optimizer': ['sgd', 'adamw']
 }
 
 print(f"Total configurations to test: {len(list(ParameterGrid(param_grid)))}")
@@ -212,8 +199,8 @@ for config in tqdm(list(ParameterGrid(param_grid)), desc="Grid Search"):
         train_ds = TensorDataset(torch.tensor(X_tr, dtype=torch.float32), torch.tensor(y_tr, dtype=torch.float32))
         val_ds = TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.float32))
 
-        train_dl = DataLoader(train_ds, batch_size=64, shuffle=True)
-        val_dl = DataLoader(val_ds, batch_size=64)
+        train_dl = DataLoader(train_ds, batch_size=128, shuffle=True)
+        val_dl = DataLoader(val_ds, batch_size=128)
 
         # init model with current config
         model = MLCupNN(
@@ -233,7 +220,7 @@ for config in tqdm(list(ParameterGrid(param_grid)), desc="Grid Search"):
         # this scheduler is used to reduce learning rate on plateau and provide smoother training on plateaus
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
 
-        tr_curve, vl_curve, vl_loss = train_model(model, optimizer, scheduler, train_dl, val_dl, scaler_y)
+        tr_curve, vl_curve, vl_loss = train_model(model, optimizer, scheduler, train_dl, val_dl, scaler_y, max_epochs=1500, patience=60, min_delta=0.01)
 
         fold_losses.append(vl_loss)
 
@@ -255,8 +242,8 @@ X_blind_scaled = scaler_X.transform(X_blind)
 # split dataset for final retrain
 X_tr, X_val, y_tr, y_val = train_test_split(X_dev_scaled, y_dev_scaled, test_size=0.2, random_state=42)
 
-train_dl = DataLoader(TensorDataset(torch.tensor(X_tr, dtype=torch.float32), torch.tensor(y_tr, dtype=torch.float32)), batch_size=64, shuffle=True)
-val_dl = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.float32)), batch_size=64)
+train_dl = DataLoader(TensorDataset(torch.tensor(X_tr, dtype=torch.float32), torch.tensor(y_tr, dtype=torch.float32)), batch_size=128, shuffle=True)
+val_dl = DataLoader(TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.float32)), batch_size=128)
 
 print(f"Best model: {best_config}\n")
 
@@ -276,7 +263,7 @@ optimizer = optimizers_dict[best_config['optimizer']](
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=10, factor=0.5)
 
 
-tr_curve_values, vl_curve_values, _ = train_model(model, optimizer, scheduler, train_dl, val_dl, scaler_y)
+tr_curve_values, vl_curve_values, _ = train_model(model, optimizer, scheduler, train_dl, val_dl, scaler_y,max_epochs=1500, patience=60, min_delta=0.01)
 
 # evaluate final model
 model.eval()
