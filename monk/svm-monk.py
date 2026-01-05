@@ -150,13 +150,10 @@ def train_final_model(X_train, y_train, X_test, y_test, dataset_idx: int = 1):
     test_mse = mean_squared_error(y_test, y_proba_test)
     tr_mse = mean_squared_error(y_train, y_proba_train)
     
-    # Calculate validation MSE from CV results
-    # We need to compute the average MSE across all CV folds
+    # calculate validation MSE from CV results
     cv_results = gs.cv_results_
     best_index = gs.best_index_
     
-    # Get predictions for validation sets during CV to compute MSE
-    # Since GridSearchCV doesn't store probabilities, we need to refit on each fold
     val_mse_list = []
     for train_idx, val_idx in cv.split(X_train, y_train):
         X_tr_fold = X_train.iloc[train_idx] if hasattr(X_train, 'iloc') else X_train[train_idx]
@@ -164,7 +161,7 @@ def train_final_model(X_train, y_train, X_test, y_test, dataset_idx: int = 1):
         y_tr_fold = y_train.iloc[train_idx] if hasattr(y_train, 'iloc') else y_train[train_idx]
         y_val_fold = y_train.iloc[val_idx] if hasattr(y_train, 'iloc') else y_train[val_idx]
         
-        # Clone and fit the best model
+        # fit the best model
         fold_model = gs.best_estimator_
         fold_model.fit(X_tr_fold, y_tr_fold)
         y_proba_val_fold = fold_model.predict_proba(X_val_fold)[:, 1]

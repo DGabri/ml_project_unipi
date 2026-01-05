@@ -407,11 +407,10 @@ def run_analysis(X_tr, y_tr, X_te, y_te, dataset_num):
     cv_scores, params_list = nested_cv(X_tr, y_tr, dataset_num, 
                                        inner_k=3, outer_k=5)
     
-    # modello finale
+    # final model
     best_net, best_cfg, train_acc, val_acc, test_acc, train_mse, val_mse, test_mse, preds = train_final(
         X_tr, y_tr, X_te, y_te, dataset_num)
     
-    # visualizzazioni
     y_te = y_te.values if hasattr(y_te, 'values') else y_te
     plot_confusion_matrix(y_te, preds, dataset_num)
     
