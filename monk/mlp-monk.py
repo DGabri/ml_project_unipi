@@ -1,6 +1,6 @@
 import numpy as np
 import seaborn as sns
-from sklearn.metrics import classification_report
+from sklearn.metrics import classification_report, mean_squared_error
 from sklearn.model_selection import train_test_split, ParameterGrid, StratifiedKFold
 import torch
 import torch.nn as nn
@@ -8,11 +8,10 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
 import random
 from monks_data_loader import load_monk_data
-from monk_utils import plot_confusion_matrix, calculate_majority_baseline,plot_curves,set_seed
+from monk_utils import plot_confusion_matrix, calculate_majority_baseline, plot_curves, set_seed
 
 # neural network model
 class MLP(nn.Module):
-
     # constructor
     def __init__(self, input_size, hidden_size):
         super(MLP, self).__init__()
@@ -22,9 +21,11 @@ class MLP(nn.Module):
             nn.Linear(hidden_size, 1),
             nn.Sigmoid()
         )
+    
     # forward method
     def forward(self, x):
         return self.net(x).squeeze(1)
+    
     # initialize weights 
     def init_weights(self):
         for m in self.modules():
@@ -33,22 +34,26 @@ class MLP(nn.Module):
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
 
-# training function with early stopping
+# training function with early stopping, MSE and accuracy tracking
 def train_net(model, opt, train_dl, val_dl, patience=15, max_ep=200, track=False):
     # initialize weights
     model.init_weights()
     criterion = nn.BCELoss()
+    mse_criterion = nn.MSELoss()
     best_loss = float('inf')
     best_weights = None
     no_improve = 0
     
     # tracking
-    tr_errs = []
-    val_errs = []
+    tr_mses = []
+    val_mses = []
+    tr_accs = []
+    val_accs = []
 
     # training loop with early stopping
     for epoch in range(max_ep):
         model.train()
+        tr_mse = 0
         tr_correct = 0
         tr_total = 0
         
@@ -60,8 +65,10 @@ def train_net(model, opt, train_dl, val_dl, patience=15, max_ep=200, track=False
             loss.backward()
             opt.step()
             
-            # tracking accuracy
+            # tracking
             if track:
+                mse = mse_criterion(out, yb)
+                tr_mse += mse.item() * len(xb)
                 pred = (out > 0.5).int()
                 tr_correct += (pred == yb.int()).sum().item()
                 tr_total += len(yb)
@@ -69,6 +76,7 @@ def train_net(model, opt, train_dl, val_dl, patience=15, max_ep=200, track=False
         # validation epoch
         model.eval()
         v_loss = 0
+        v_mse = 0
         v_correct = 0
         v_total = 0
         
@@ -78,23 +86,31 @@ def train_net(model, opt, train_dl, val_dl, patience=15, max_ep=200, track=False
                 out = model(xb)
                 loss = criterion(out, yb)
                 v_loss += loss.item() * len(xb)
-                # tracking accuracy
+                
+                # tracking
                 if track:
+                    mse = mse_criterion(out, yb)
+                    v_mse += mse.item() * len(xb)
                     pred = (out > 0.5).int()
                     v_correct += (pred == yb.int()).sum().item()
                     v_total += len(yb)
         
-        # average validation loss
+        # average losses
         v_loss /= len(val_dl.dataset)
         
-        # tracking errors
+        # tracking metrics
         if track:
-            tr_err = 1 - (tr_correct / tr_total)
-            v_err = 1 - (v_correct / v_total)
-            tr_errs.append(tr_err)
-            val_errs.append(v_err)
+            tr_mse /= len(train_dl.dataset)
+            v_mse /= len(val_dl.dataset)
+            tr_acc = tr_correct / tr_total
+            v_acc = v_correct / v_total
+            
+            tr_mses.append(tr_mse)
+            val_mses.append(v_mse)
+            tr_accs.append(tr_acc)
+            val_accs.append(v_acc)
 
-        # early stopping check
+        # early stopping check (still based on BCE loss)
         if v_loss < best_loss:
             best_loss = v_loss
             best_weights = model.state_dict().copy()
@@ -108,7 +124,7 @@ def train_net(model, opt, train_dl, val_dl, patience=15, max_ep=200, track=False
         model.load_state_dict(best_weights)
     
     if track:
-        return model, tr_errs, val_errs
+        return model, tr_mses, val_mses, tr_accs, val_accs
     return model
 
 # evaluation function
@@ -124,6 +140,20 @@ def eval_model(model, dl):
             correct += (pred == yb.int()).sum().item()
             total += len(yb)
     return correct / total if total > 0 else 0
+
+# NEW: function to calculate MSE
+def eval_mse(model, dl):
+    model.eval()
+    all_preds = []
+    all_targets = []
+    
+    with torch.no_grad():
+        for xb, yb in dl:
+            out = model(xb)
+            all_preds.extend(out.cpu().numpy())
+            all_targets.extend(yb.cpu().numpy())
+    
+    return mean_squared_error(all_targets, all_preds)
 
 # hyperparameter grid
 def get_params(dataset_num):
@@ -208,7 +238,7 @@ def nested_cv(X_tr, y_tr, dataset_num, inner_k=3, outer_k=5):
                 pat = 10 if dataset_num == 1 else 15
                 maxe = 100 if dataset_num == 1 else 200
                 
-                # train and evaluate
+                # train and evaluate (without tracking)
                 net = train_net(net, opt, tr_dl, val_dl, patience=pat, 
                               max_ep=maxe, track=False)
                 sc = eval_model(net, val_dl)
@@ -232,7 +262,7 @@ def nested_cv(X_tr, y_tr, dataset_num, inner_k=3, outer_k=5):
         tr_dl = DataLoader(tr_ds, batch_size=best_cfg['bs'], shuffle=True)
         val_dl = DataLoader(val_ds, batch_size=best_cfg['bs'], shuffle=False)
 
-        # train final model
+        # train final model (without tracking)
         final_net = MLP(X.shape[1], best_cfg['n_units'])
         opt = optim.SGD(final_net.parameters(), lr=best_cfg['lr'],
                        momentum=best_cfg['mom'], weight_decay=best_cfg['wd'])
@@ -271,10 +301,12 @@ def train_final(X_tr, y_tr, X_te, y_te, dataset_num):
     grid = list(ParameterGrid(params))
     
     best_cfg = None
-    best_acc = 0
+    best_val_acc = 0  # validation accuracy
     best_net = None
-    best_tr_errs = None
-    best_val_errs = None
+    best_tr_losses = None
+    best_val_losses = None
+    best_tr_accs = None
+    best_val_accs = None
 
     # hyperparameter search
     for i, cfg in enumerate(grid):
@@ -296,25 +328,46 @@ def train_final(X_tr, y_tr, X_te, y_te, dataset_num):
         pat = 10 if dataset_num == 1 else 15
         maxe = 100 if dataset_num == 1 else 200
         
-        net, tr_e, val_e = train_net(net, opt, tr_dl, val_dl,
-                                    patience=pat, max_ep=maxe, track=True)
-        acc = eval_model(net, val_dl)
+        # train with tracking
+        net, tr_mse, val_mse, tr_acc, val_acc = train_net(net, opt, tr_dl, val_dl,
+                                                            patience=pat, max_ep=maxe, track=True)
+        val_acc_final = eval_model(net, val_dl)
         
-        if acc > best_acc:
-            best_acc = acc
+        if val_acc_final > best_val_acc:
+            best_val_acc = val_acc_final
             best_cfg = cfg
             best_net = net
-            best_tr_errs = tr_e
-            best_val_errs = val_e
+            best_tr_losses = tr_mse
+            best_val_losses = val_mse
+            best_tr_accs = tr_acc
+            best_val_accs = val_acc
         
         if (i + 1) % 5 == 0:
-            print(f"  {i+1}/{len(grid)} done, best: {best_acc:.4f}")
+            print(f"  {i+1}/{len(grid)} done, best val acc: {best_val_acc:.4f}")
     
     print(f"\nBest config: {best_cfg}")
-    print(f"Val accuracy: {best_acc:.4f}")
+    print(f"Val accuracy: {best_val_acc:.4f}")
     
-    if best_tr_errs and best_val_errs:
-        plot_curves(best_tr_errs, best_val_errs, dataset_num, " (best)")
+    # plot loss and accuracy curves
+    if best_tr_losses and best_val_losses and best_tr_accs and best_val_accs:
+        plot_curves(best_tr_losses, best_val_losses, best_tr_accs, best_val_accs, 
+                   dataset_num, " (best)")
+    
+    # Calculate train accuracy and MSE on the best model
+    X_t_t = torch.FloatTensor(X_t)
+    y_t_t = torch.FloatTensor(y_t)
+    tr_ds = TensorDataset(X_t_t, y_t_t)
+    tr_dl = DataLoader(tr_ds, batch_size=32, shuffle=False)
+    
+    train_acc = eval_model(best_net, tr_dl)
+    train_mse = eval_mse(best_net, tr_dl)
+    
+    # Calculate validation MSE
+    X_v_t = torch.FloatTensor(X_v)
+    y_v_t = torch.FloatTensor(y_v)
+    val_ds = TensorDataset(X_v_t, y_v_t)
+    val_dl = DataLoader(val_ds, batch_size=32, shuffle=False)
+    val_mse = eval_mse(best_net, val_dl)
     
     # test
     X_te_t = torch.FloatTensor(X_te)
@@ -323,17 +376,26 @@ def train_final(X_tr, y_tr, X_te, y_te, dataset_num):
     te_dl = DataLoader(te_ds, batch_size=32, shuffle=False)
     
     test_acc = eval_model(best_net, te_dl)
+    test_mse = eval_mse(best_net, te_dl)
     
     best_net.eval()
     with torch.no_grad():
         preds = best_net(X_te_t).cpu().numpy()
         preds_bin = (preds > 0.5).astype(int)
     
-    print(f"\nTest accuracy: {test_acc:.4f}")
+    print(f"\nTrain accuracy: {train_acc:.4f}")
+    print(f"Val accuracy: {best_val_acc:.4f}")
+    print(f"Test accuracy: {test_acc:.4f}")
+    print(f"Train-Test delta: {((train_acc - test_acc)*100):.2f} %")
+    
+    print(f"\nTrain MSE: {train_mse:.4f}")
+    print(f"Val MSE: {val_mse:.4f}")
+    print(f"Test MSE: {test_mse:.4f}")
+    
     print("\nClassification report:")
     print(classification_report(y_te, preds_bin))
     
-    return best_net, best_cfg, test_acc, preds_bin
+    return best_net, best_cfg, train_acc, best_val_acc, test_acc, train_mse, val_mse, test_mse, preds_bin
 
 # main analysis function
 def run_analysis(X_tr, y_tr, X_te, y_te, dataset_num):
@@ -346,12 +408,13 @@ def run_analysis(X_tr, y_tr, X_te, y_te, dataset_num):
                                        inner_k=3, outer_k=5)
     
     # modello finale
-    best_net, best_cfg, test_acc, preds = train_final(X_tr, y_tr, X_te, y_te, 
-                                                       dataset_num)
+    best_net, best_cfg, train_acc, val_acc, test_acc, train_mse, val_mse, test_mse, preds = train_final(
+        X_tr, y_tr, X_te, y_te, dataset_num)
     
     # visualizzazioni
     y_te = y_te.values if hasattr(y_te, 'values') else y_te
     plot_confusion_matrix(y_te, preds, dataset_num)
+    
     return {
         'baseline': base_acc,
         'maj_class': maj_class,
@@ -360,7 +423,12 @@ def run_analysis(X_tr, y_tr, X_te, y_te, dataset_num):
         'cv_std': cv_scores.std(),
         'params_per_fold': params_list,
         'final_params': best_cfg,
+        'train_acc': train_acc,
+        'val_acc': val_acc,
         'test_acc': test_acc,
+        'train_mse': train_mse,
+        'val_mse': val_mse,
+        'test_mse': test_mse,
     }
 
 

@@ -16,28 +16,28 @@ from sklearn.metrics import (
     mean_squared_error,
 )
 from monks_data_loader import load_monk_data
-from monk_utils import plot_roc_curve, plot_confusion_matrix, calculate_majority_baseline
+from monk_utils import *
 
 # parameter grid for each dataset
 def get_param_grid(dataset_idx: int) -> Dict:
     if dataset_idx == 1:
         return {
             "svc__kernel": ["linear", "rbf"],
-            "svc__C": [0.1, 1, 10, 20, 30, 50],
+            "svc__C": [0.1, 1, 10, 20, 30, 50, 100],
             "svc__gamma": [0.01, 0.1, 1],
         }
     elif dataset_idx == 2:
         return {
             'svc__kernel': ['poly', "linear", "rbf"],
             'svc__degree': [2, 3],
-            'svc__C': [5, 10, 15, 20, 25, 50, 70, 80, 90, 100],
+            'svc__C': [1,5, 10, 15, 20, 25, 50, 70, 80, 90, 100],
             "svc__gamma": ["auto", 0.001, 0.01],
             'svc__class_weight': ['balanced'],
         }
     else:
         return {
             "svc__kernel": ["linear"],
-            "svc__C": [0.05, 0.1, 0.2, 1, 2, 3, 4, 5, 10],
+            "svc__C": [0.05, 0.1, 0.2, 1, 2, 3],
             "svc__gamma": ["auto", 0.001, 0.01, 0.1, 1],
             'svc__class_weight': ['balanced'],
         }
@@ -144,12 +144,36 @@ def train_final_model(X_train, y_train, X_test, y_test, dataset_idx: int = 1):
     # accuracy
     test_acc = accuracy_score(y_test, y_pred_test)
     tr_acc = accuracy_score(y_train, y_pred_train)
+    val_acc = gs.best_score_
     
     # MSE
     test_mse = mean_squared_error(y_test, y_proba_test)
     tr_mse = mean_squared_error(y_train, y_proba_train)
+    
+    # Calculate validation MSE from CV results
+    # We need to compute the average MSE across all CV folds
+    cv_results = gs.cv_results_
+    best_index = gs.best_index_
+    
+    # Get predictions for validation sets during CV to compute MSE
+    # Since GridSearchCV doesn't store probabilities, we need to refit on each fold
+    val_mse_list = []
+    for train_idx, val_idx in cv.split(X_train, y_train):
+        X_tr_fold = X_train.iloc[train_idx] if hasattr(X_train, 'iloc') else X_train[train_idx]
+        X_val_fold = X_train.iloc[val_idx] if hasattr(X_train, 'iloc') else X_train[val_idx]
+        y_tr_fold = y_train.iloc[train_idx] if hasattr(y_train, 'iloc') else y_train[train_idx]
+        y_val_fold = y_train.iloc[val_idx] if hasattr(y_train, 'iloc') else y_train[val_idx]
+        
+        # Clone and fit the best model
+        fold_model = gs.best_estimator_
+        fold_model.fit(X_tr_fold, y_tr_fold)
+        y_proba_val_fold = fold_model.predict_proba(X_val_fold)[:, 1]
+        fold_mse = mean_squared_error(y_val_fold, y_proba_val_fold)
+        val_mse_list.append(fold_mse)
+    
+    val_mse = np.mean(val_mse_list)
 
-    return gs, test_acc, tr_acc, test_mse, tr_mse, y_pred_test
+    return gs, test_acc, tr_acc, val_acc, test_mse, tr_mse, val_mse, y_pred_test
 
 
 def full_analysis(X_train, y_train, X_test, y_test, dataset_idx: int = 1):
@@ -165,7 +189,7 @@ def full_analysis(X_train, y_train, X_test, y_test, dataset_idx: int = 1):
     )
     
     # train final model
-    gs, test_acc, tr_acc, test_mse, tr_mse, y_pred = train_final_model(
+    gs, test_acc, tr_acc, val_acc, test_mse, tr_mse, val_mse, y_pred = train_final_model(
         X_train, y_train, X_test, y_test, dataset_idx=dataset_idx)
     cv_mean = gs.best_score_
     best = gs.best_estimator_
@@ -176,11 +200,13 @@ def full_analysis(X_train, y_train, X_test, y_test, dataset_idx: int = 1):
     
     print("")
     print(f"TR accuracy: {(tr_acc*100):.2f} %")
+    print(f"Val accuracy: {(val_acc*100):.2f} %")   
     print(f"TS accuracy: {(test_acc*100):.2f} %")
     print(f"Train-Test delta: {((tr_acc - test_acc)*100):.2f} %")
     
     print("")
     print(f"TR MSE: {tr_mse:.4f}")
+    print(f"Val MSE: {val_mse:.4f}")
     print(f"TS MSE: {test_mse:.4f}")
     
     print("")
@@ -188,10 +214,8 @@ def full_analysis(X_train, y_train, X_test, y_test, dataset_idx: int = 1):
     
     # Confusion matrix
     plot_confusion_matrix(y_test, y_pred, title=f"Confusion Matrix - Monk-{dataset_idx}")
-    
-    # ROC curve
-    y_scores = best.predict_proba(X_test)[:, 1]
-    plot_roc_curve(y_test, y_scores, title=f"ROC Curve - Monk-{dataset_idx}")
+ 
+    plot_combined_C_gamma_accurate(gs, dataset_idx=dataset_idx)
     
     return {
         'baseline_acc': baseline_acc,
@@ -205,8 +229,10 @@ def full_analysis(X_train, y_train, X_test, y_test, dataset_idx: int = 1):
         'best_params_per_fold': best_params_per_fold,
         'final_best_params': gs.best_params_,
         'final_cv_score': gs.best_score_,
+        'val_acc': val_acc,
         'test_acc': test_acc,
         'tr_acc': tr_acc,
+        'val_mse': val_mse,
         'test_mse': test_mse,
         'tr_mse': tr_mse,
     }
