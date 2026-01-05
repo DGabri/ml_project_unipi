@@ -176,6 +176,7 @@ grid_search_start = time.time()
 for config in tqdm(list(ParameterGrid(param_grid)), desc="Grid Search"):
 
     fold_losses = []
+    fold_train_losses = []
     config_start = time.time()
 
     for fold_idx, (tr_idx, val_idx) in enumerate(kfold.split(X_dev)):
@@ -223,9 +224,19 @@ for config in tqdm(list(ParameterGrid(param_grid)), desc="Grid Search"):
         tr_curve, vl_curve, vl_loss = train_model(model, optimizer, scheduler, train_dl, val_dl, scaler_y, max_epochs=1500, patience=60, min_delta=0.01)
 
         fold_losses.append(vl_loss)
+        fold_train_losses.append(tr_curve[-1])
 
     mean_loss = np.mean(fold_losses)
-    
+    mean_train_loss = np.mean(fold_train_losses)
+
+    all_results.append({
+        'config': config,
+        'mean_val_mee': mean_loss,
+        'mean_train_mee': mean_train_loss,
+        'std_val_mee': np.std(fold_losses),
+        'std_train_mee': np.std(fold_train_losses)
+    })
+
     if mean_loss < best_cv_loss:
         best_cv_loss = mean_loss
         best_config = config
@@ -281,10 +292,16 @@ with torch.no_grad():
     # hold oout test set
     y_test_pred = scaler_y.inverse_transform(model(torch.tensor(X_test_scaled, dtype=torch.float32)).numpy())
     test_mee_final = mee(y_test, y_test_pred)
-    
-    # blind set computation 
+
+    # blind set computation
     y_blind = scaler_y.inverse_transform(model(torch.tensor(X_blind_scaled, dtype=torch.float32)).numpy())
 
+print("aggregated metrics:")
+print(f"Best CV Val MEE: {best_cv_loss:.6f}")
+print(f"Final params: {best_config}")
+print(f"Final train MEE: {train_mee_final:.6f}")
+print(f"Final val MEE:   {val_mee_final:.6f}")
+print(f"Final test MEE:  {test_mee_final:.6f}")
 
 write_blind_results("Pytorch_MLP", y_blind)
 

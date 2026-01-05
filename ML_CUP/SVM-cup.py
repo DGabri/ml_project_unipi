@@ -25,10 +25,11 @@ X_blind = blind_df.values
 # hyperparameter grid
 param_grid = {
     'estimator__kernel': ['rbf'],
-    'estimator__C': [1,2,3,4,5, 6, 8, 10, 12, 15],
-    'estimator__gamma': [0.8, 1.0, 1.1,1.2,1.3,1.4, 1.5],
-    'estimator__epsilon': [0.25, 0.3, 0.35, 0.4, 0.5,0.6,0.7]
+    'estimator__C': [0.1, 0.5, 1, 2, 3, 5],
+    'estimator__gamma': [0.01, 0.05, 0.1, 0.3, 0.5],
+    'estimator__epsilon': [0.1, 0.2, 0.3, 0.5]
 }
+
 
 # initialize nested k fold cv
 outer_cv = KFold(n_splits=5, shuffle=True, random_state=42)
@@ -150,10 +151,3 @@ final_tr_mee = euclidean_distance_score(y, y_pred)
 final_tr_r2 = r2_score(y, y_pred)
 print(f"Final train MEE: {final_tr_mee:.6f}")
 print(f"Final train R²:  {final_tr_r2:.6f}")
-
-# Blind predictions
-y_blind_sc = final_mdl.predict(X_blind_sc)
-y_blind = final_tgt_sc.inverse_transform(y_blind_sc)
-
-# write blind results
-write_blind_results("", y_blind)

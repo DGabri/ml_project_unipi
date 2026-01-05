@@ -160,10 +160,3 @@ final_tr_mee = euclidean_distance_score(y, y_pred)
 final_tr_r2 = r2_score(y, y_pred)
 print(f"Final train MEE: {final_tr_mee:.6f}")
 print(f"Final train R²:  {final_tr_r2:.6f}")
-
-# Blind predictions
-y_blind_sc = final_mdl.predict(X_blind_sc)
-y_blind = final_tgt_sc.inverse_transform(y_blind_sc)
-
-# write blind results
-write_blind_results("", y_blind)

@@ -67,8 +67,8 @@ ax.set_xlabel('Features', fontsize=12, fontweight='bold')
 ax.set_ylabel('Features', fontsize=12, fontweight='bold')
 
 plt.tight_layout()
-plt.savefig('./results/data_exploration/correlation_matrix_features.png', dpi=300, bbox_inches='tight')
-plt.close()
+plt.show()
+
 print("✓ Feature correlation matrix saved")
 
 ############################################
@@ -103,6 +103,52 @@ ax.set_xlabel('Target Variables', fontsize=12, fontweight='bold')
 ax.set_ylabel('Input Features', fontsize=12, fontweight='bold')
 
 plt.tight_layout()
-plt.savefig('./results/data_exploration/correlation_matrix_features_targets.png', dpi=300, bbox_inches='tight')
-plt.close()
+plt.show()
+
 print("✓ Feature-target correlation matrix saved")
+
+############################################
+# 3. DISTRIBUTION PLOTS FOR INPUT VARIABLES
+############################################
+
+print("Generating distribution plots for input variables...")
+
+# Calculate grid dimensions
+n_features = X.shape[1]
+n_cols = 4
+n_rows = int(np.ceil(n_features / n_cols))
+
+# Create figure with subplots
+fig, axes = plt.subplots(n_rows, n_cols, figsize=(16, n_rows * 3))
+axes = axes.flatten()
+
+# Define colors for each plot
+colors = plt.cm.Set3(np.linspace(0, 1, n_features))
+
+# Plot each feature
+for idx, col in enumerate(X.columns):
+    ax = axes[idx]
+    data = X[col].values
+
+    # Create histogram with KDE overlay
+    ax.hist(data, bins=30, density=True, alpha=0.7, color=colors[idx], edgecolor='black', linewidth=0.5)
+
+    # Add KDE curve
+    kde_xs = np.linspace(data.min(), data.max(), 200)
+    kde = stats.gaussian_kde(data)
+    ax.plot(kde_xs, kde(kde_xs), color='black', linewidth=2, alpha=0.8)
+
+    # Styling
+    ax.set_xlabel('Value', fontsize=10)
+    ax.set_ylabel('Density', fontsize=10)
+    ax.set_title(f'Input {idx+1}', fontsize=11, fontweight='bold')
+    ax.legend(fontsize=8, loc='upper right')
+
+# Hide unused subplots
+for idx in range(n_features, len(axes)):
+    axes[idx].axis('off')
+
+plt.suptitle('Distribution of Input Features', fontsize=18, fontweight='bold', y=0.995)
+plt.tight_layout()
+plt.show()
+print("✓ Input distribution plots saved")
