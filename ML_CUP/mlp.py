@@ -179,8 +179,10 @@ for config in tqdm(list(ParameterGrid(param_grid)), desc="Grid Search"):
     fold_train_losses = []
     config_start = time.time()
 
+    #get each dataset fold from sklearn kfold
     for fold_idx, (tr_idx, val_idx) in enumerate(kfold.split(X_dev)):
 
+        # get subsets for training
         X_tr_raw  = X_dev[tr_idx]
         X_val_raw = X_dev[val_idx]
         y_tr_raw  = y_dev[tr_idx]
@@ -200,6 +202,7 @@ for config in tqdm(list(ParameterGrid(param_grid)), desc="Grid Search"):
         train_ds = TensorDataset(torch.tensor(X_tr, dtype=torch.float32), torch.tensor(y_tr, dtype=torch.float32))
         val_ds = TensorDataset(torch.tensor(X_val, dtype=torch.float32), torch.tensor(y_val, dtype=torch.float32))
 
+        # minibatch
         train_dl = DataLoader(train_ds, batch_size=128, shuffle=True)
         val_dl = DataLoader(val_ds, batch_size=128)
 
